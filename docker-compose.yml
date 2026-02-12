@@ -1,0 +1,151 @@
+# ============================================================
+# DOCKER-COMPOSE v-worker
+# ============================================================
+# Pipeline de video e orquestracao (separado do v-api).
+# Compartilha Redis e PostgreSQL com v-backend.
+# ============================================================
+
+services:
+  # ==================== V-WORKER API ====================
+  v-worker-api:
+    build:
+      context: .
+    container_name: v-worker-api
+    restart: unless-stopped
+    ports:
+      - "5002:5000"
+    env_file:
+      - ../v-backend/.env
+    environment:
+      # Database
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=prefer"
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+      # JWT & Auth
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_UUID: ${ADMIN_UUID:-8d04a8bf-0b80-48fa-9fb1-0b42dcb36a11}
+      SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      ANON_KEY: ${ANON_KEY}
+
+      # Redis (compartilhado com v-backend)
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+      # V-SERVICES
+      V_SERVICES_URL: ${V_SERVICES_URL:-http://v-services:5000}
+      V_SERVICES_HOST: ${V_SERVICES_HOST:-v-services}
+      V_SERVICES_SECRET_TOKEN: ${V_SERVICES_SECRET_TOKEN}
+
+      # V-MATTING
+      V_MATTING_URL: ${V_MATTING_URL:-http://v-matting:5000}
+
+      # V-EDITOR
+      V_EDITOR_URL: ${V_EDITOR_URL:-http://v-editor:5018}
+
+      # V-API (callbacks)
+      WEBHOOK_INTERNAL_URL: http://v-api:5000
+
+      # B2 Storage
+      B2_APPLICATION_KEY_ID: ${B2_APPLICATION_KEY_ID}
+      B2_APPLICATION_KEY: ${B2_APPLICATION_KEY}
+      B2_BUCKET_NAME: ${B2_BUCKET_NAME}
+      B2_ENDPOINT: ${B2_ENDPOINT}
+
+      # Modal
+      MODAL_ENDPOINT_URL: ${MODAL_ENDPOINT_URL}
+      MODAL_MATTING_ENABLED: ${MODAL_MATTING_ENABLED:-true}
+      MODAL_OUTPUT_FORMAT: alpha_only
+
+      # Assembly AI & OpenAI
+      ASSEMBLY_API_KEY: ${ASSEMBLY_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # Feature Flags
+      USE_NEW_B2_PATHS: ${USE_NEW_B2_PATHS:-true}
+
+    networks:
+      - vinicius-ai-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ==================== VIDEO WORKER ====================
+  video-worker:
+    build:
+      context: .
+    container_name: video-worker
+    restart: unless-stopped
+    command: ["python", "worker.py", "--concurrency", "4"]
+    env_file:
+      - ../v-backend/.env
+    environment:
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+      # Database
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=prefer"
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+      # JWT & Auth
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_UUID: ${ADMIN_UUID:-8d04a8bf-0b80-48fa-9fb1-0b42dcb36a11}
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_URL: ${SUPABASE_URL:-https://api.vinicius.ai}
+      GOTRUE_URL: ${GOTRUE_URL:-https://api.vinicius.ai/auth/v1}
+
+      # V-SERVICES
+      V_SERVICES_URL: ${V_SERVICES_URL:-http://v-services:5000}
+      V_SERVICES_HOST: ${V_SERVICES_HOST:-v-services}
+      V_SERVICES_SECRET_TOKEN: ${V_SERVICES_SECRET_TOKEN}
+
+      # V-MATTING
+      V_MATTING_URL: ${V_MATTING_URL:-http://v-matting:5000}
+
+      # V-EDITOR
+      V_EDITOR_URL: ${V_EDITOR_URL:-http://v-editor:5018}
+
+      # Webhook
+      WEBHOOK_INTERNAL_URL: http://v-api:5000
+
+      # B2 Storage
+      B2_APPLICATION_KEY_ID: ${B2_APPLICATION_KEY_ID}
+      B2_APPLICATION_KEY: ${B2_APPLICATION_KEY}
+      B2_BUCKET_NAME: ${B2_BUCKET_NAME}
+      B2_ENDPOINT: ${B2_ENDPOINT}
+
+      # Assembly AI & OpenAI
+      ASSEMBLY_API_KEY: ${ASSEMBLY_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # Modal
+      MODAL_ENDPOINT_URL: ${MODAL_ENDPOINT_URL}
+      MODAL_MATTING_ENABLED: ${MODAL_MATTING_ENABLED:-true}
+      MODAL_OUTPUT_FORMAT: alpha_only
+
+      # Feature Flags
+      USE_NEW_B2_PATHS: ${USE_NEW_B2_PATHS:-true}
+      MATTING_PARALLEL_WORKERS: ${MATTING_PARALLEL_WORKERS:-5}
+
+    networks:
+      - vinicius-ai-network
+
+networks:
+  vinicius-ai-network:
+    external: true
