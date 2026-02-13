@@ -180,7 +180,10 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
     duration_ms = getattr(state, "duration_ms", None) or 0
     if not duration_ms and timestamps:
         # Calcular duração total a partir dos timestamps
-        duration_ms = max(t.get("end", 0) for t in timestamps)
+        # Timestamps podem estar em segundos (ex: 17.3) ou ms (ex: 17300)
+        max_end = max(t.get("end", 0) for t in timestamps)
+        # Se < 1000, provavelmente em segundos → converter para ms
+        duration_ms = max_end * 1000 if max_end < 1000 else max_end
 
     scene_timings = _compute_scene_timings(
         rendered_scenes, scene_overrides, timestamps, duration_ms
