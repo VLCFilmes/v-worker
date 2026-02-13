@@ -21,7 +21,7 @@ import time
 
 V_LLM_DIRECTORS_URL = get_env('V_LLM_DIRECTORS_URL', 'http://v-llm-directors:5025')
 FULL_PIPELINE_ENDPOINT = f"{V_LLM_DIRECTORS_URL}/render/full-pipeline"
-LLM_DIRECTOR_TIMEOUT = int(get_env('LLM_DIRECTOR_TIMEOUT', '360'))
+LLM_DIRECTOR_TIMEOUT = int(get_env('LLM_DIRECTOR_TIMEOUT', '600'))
 
 # Diretório base no volume compartilhado (montado em v-llm-directors e v-editor-python)
 SHARED_VOLUME_BASE = "/app/shared/temp_frames"
