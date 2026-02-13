@@ -110,6 +110,34 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
     logger.info(f"   Style: {template_style.get('mood', 'N/A')}")
     logger.info(f"   Output: {output_dir}")
 
+    # ─── Determinar render_mode ───
+    # Flat mode: composição feita no Playwright (MG puro, sem vídeo base)
+    # Layered mode: cada layer separada (necessário para talking_head + MG, etc)
+    render_mode = state.metadata.get("render_mode") if hasattr(state, 'metadata') and state.metadata else None
+    if not render_mode:
+        # Auto-detect: se não tem vídeo base, usar flat (mais rápido, melhor qualidade)
+        has_video = bool(getattr(state, "video_url", None))
+        render_mode = "layered" if has_video else "flat"
+
+    logger.info(f"   🎨 Render mode: {render_mode}")
+
+    # ─── Pré-calcular scene_timings para flat mode ───
+    # No flat mode, o Playwright precisa saber a duração de cada cena
+    # para renderizar o número correto de frames.
+    pre_scene_timings = []
+    if render_mode == "flat":
+        duration_ms_pre = getattr(state, "duration_ms", None) or 0
+        if not duration_ms_pre and timestamps:
+            max_end = max(t.get("end", 0) for t in timestamps)
+            duration_ms_pre = max_end * 1000 if max_end < 1000 else max_end
+        num_scenes = len(scene_descriptions) or 1
+        if duration_ms_pre > 0:
+            per_scene_ms = duration_ms_pre / num_scenes
+            pre_scene_timings = [
+                {"start_ms": round(i * per_scene_ms), "end_ms": round((i + 1) * per_scene_ms)}
+                for i in range(num_scenes)
+            ]
+
     # ─── Chamar v-llm-directors /render/full-pipeline ───
     payload = {
         "user_prompt": user_prompt,
@@ -119,9 +147,14 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
         "scene_descriptions": scene_descriptions,
         "timestamps": timestamps,
         "output_dir": output_dir,
-        "render_animations": True,
+        "render_animations": True if render_mode == "layered" else False,
+        "render_mode": render_mode,
         "fps": fps,
     }
+
+    # Flat mode: incluir scene_timings para o Playwright
+    if pre_scene_timings:
+        payload["scene_timings"] = pre_scene_timings
 
     try:
         logger.info(f"🌐 Chamando v-llm-directors: {FULL_PIPELINE_ENDPOINT}")
@@ -158,53 +191,97 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
 
     # ─── Processar resultado ───
     rendered_scenes = result.get("rendered_scenes", [])
+    result_render_mode = result.get("render_mode", "layered")
     llm_result = result.get("llm_result", {})
     llm_usage = result.get("llm_usage", {})
 
-    total_layers = sum(len(s.get("layers", [])) for s in rendered_scenes)
-    total_strokes = sum(len(s.get("stroke_reveals", [])) for s in rendered_scenes)
-
-    logger.info(
-        f"✅ [VISUAL_LAYOUT] Resultado: "
-        f"{len(rendered_scenes)} cenas, {total_layers} layers, "
-        f"{total_strokes} strokes"
-    )
-
-    if llm_usage:
+    if result_render_mode == "flat":
+        # ── FLAT MODE: cenas pré-compostas pelo Playwright ──
+        total_frames_all = sum(s.get("total_frames", 0) for s in rendered_scenes)
         logger.info(
-            f"💰 [VISUAL_LAYOUT] LLM: {llm_usage.get('total_tokens', 0)} tokens "
-            f"(model: {llm_usage.get('model', 'N/A')})"
+            f"✅ [VISUAL_LAYOUT] Resultado FLAT: "
+            f"{len(rendered_scenes)} cenas, {total_frames_all} frames total"
         )
 
-    # ─── Calcular timing das cenas ───
-    duration_ms = getattr(state, "duration_ms", None) or 0
-    if not duration_ms and timestamps:
-        # Calcular duração total a partir dos timestamps
-        # Timestamps podem estar em segundos (ex: 17.3) ou ms (ex: 17300)
-        max_end = max(t.get("end", 0) for t in timestamps)
-        # Se < 1000, provavelmente em segundos → converter para ms
-        duration_ms = max_end * 1000 if max_end < 1000 else max_end
+        if llm_usage:
+            logger.info(
+                f"💰 [VISUAL_LAYOUT] LLM: {llm_usage.get('total_tokens', 0)} tokens "
+                f"(model: {llm_usage.get('model', 'N/A')})"
+            )
 
-    scene_timings = _compute_scene_timings(
-        rendered_scenes, scene_overrides, timestamps, duration_ms
-    )
+        # Montar flat_scenes para o v-editor-python
+        flat_scenes = []
+        cumulative_ms = 0
+        for s in rendered_scenes:
+            dur_s = s.get("duration_s", 4.0)
+            dur_ms = int(dur_s * 1000)
+            flat_scenes.append({
+                "scene_id": s.get("scene_id"),
+                "frames_dir": s.get("frames_dir"),
+                "total_frames": s.get("total_frames", 0),
+                "fps": s.get("fps", fps),
+                "duration_s": dur_s,
+                "start_time": cumulative_ms,
+                "end_time": cumulative_ms + dur_ms,
+            })
+            cumulative_ms += dur_ms
 
-    # ─── Montar png_results com paths e timing ───
-    layers_list = _build_png_results_with_paths(
-        rendered_scenes, scene_timings, canvas_w, canvas_h, fps
-    )
+        # Wrap em dict compatível com subtitle_pipeline_service
+        png_results = {
+            "status": "success",
+            "render_mode": "flat",
+            "flat_scenes": flat_scenes,
+            "sentences": [],
+            "positioned_sentences": [],
+            "backgrounds": [],
+            "motion_graphics": [],  # Vazio — flat_scenes substitui
+            "total_pngs": total_frames_all,
+            "phrases": [],
+            "source": "visual_layout_director",
+        }
+    else:
+        # ── LAYERED MODE (padrão) ──
+        total_layers = sum(len(s.get("layers", [])) for s in rendered_scenes)
+        total_strokes = sum(len(s.get("stroke_reveals", [])) for s in rendered_scenes)
 
-    # Wrap em dict compatível com subtitle_pipeline_service
-    png_results = {
-        "status": "success",
-        "sentences": [],
-        "positioned_sentences": [],
-        "backgrounds": [],
-        "motion_graphics": layers_list,
-        "total_pngs": len(layers_list),
-        "phrases": [],
-        "source": "visual_layout_director",
-    }
+        logger.info(
+            f"✅ [VISUAL_LAYOUT] Resultado: "
+            f"{len(rendered_scenes)} cenas, {total_layers} layers, "
+            f"{total_strokes} strokes"
+        )
+
+        if llm_usage:
+            logger.info(
+                f"💰 [VISUAL_LAYOUT] LLM: {llm_usage.get('total_tokens', 0)} tokens "
+                f"(model: {llm_usage.get('model', 'N/A')})"
+            )
+
+        # ─── Calcular timing das cenas ───
+        duration_ms = getattr(state, "duration_ms", None) or 0
+        if not duration_ms and timestamps:
+            max_end = max(t.get("end", 0) for t in timestamps)
+            duration_ms = max_end * 1000 if max_end < 1000 else max_end
+
+        scene_timings = _compute_scene_timings(
+            rendered_scenes, scene_overrides, timestamps, duration_ms
+        )
+
+        # ─── Montar png_results com paths e timing ───
+        layers_list = _build_png_results_with_paths(
+            rendered_scenes, scene_timings, canvas_w, canvas_h, fps
+        )
+
+        # Wrap em dict compatível com subtitle_pipeline_service
+        png_results = {
+            "status": "success",
+            "sentences": [],
+            "positioned_sentences": [],
+            "backgrounds": [],
+            "motion_graphics": layers_list,
+            "total_pngs": len(layers_list),
+            "phrases": [],
+            "source": "visual_layout_director",
+        }
 
     elapsed = time.time() - start
     logger.info(f"⏱️ [VISUAL_LAYOUT] Concluído em {elapsed:.1f}s")

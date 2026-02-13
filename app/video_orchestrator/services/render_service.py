@@ -971,6 +971,11 @@ class RenderService:
         if "subtitle_animation_config" in payload:
             render_payload["subtitle_animation_config"] = payload["subtitle_animation_config"]
             logger.info(f"   - subtitle_animation_config: {payload['subtitle_animation_config']}")
+
+        # 🎬 Flat mode: propagar flat_scenes para o v-editor-python
+        if "flat_scenes" in payload:
+            render_payload["flat_scenes"] = payload["flat_scenes"]
+            logger.info(f"   - flat_scenes: {len(payload['flat_scenes'])} cenas pré-compostas")
         
         # Logs detalhados para debug
         logger.info(f"📦 Payload montado para v-editor:")

@@ -219,6 +219,10 @@ class SubtitlePipelineService:
                 width = self._get_value(video_settings, "width", 1080)
                 height = self._get_value(video_settings, "height", 1920)
                 duration_frames = int((duration_ms / 1000) * fps)
+
+                # Detectar flat mode (cenas pré-compostas pelo Playwright)
+                is_flat = png_results.get("render_mode") == "flat"
+                flat_scenes = png_results.get("flat_scenes", []) if is_flat else []
                 
                 # 🔧 FIX: render_service._build_render_payload() extrai canvas, fps e
                 # duration_in_frames do ROOT level do payload (não do nested project_settings).
@@ -251,9 +255,20 @@ class SubtitlePipelineService:
                     "sentences": [],
                     "duration_ms": duration_ms,
                 }
-                logger.info(f"✅ [Step 14] Payload MG: {width}x{height}@{fps}fps, "
-                            f"{duration_frames} frames ({duration_ms}ms), "
-                            f"{len(motion_graphics)} MG layers")
+
+                # Flat mode: incluir flat_scenes no payload (v-editor concatena direto)
+                if flat_scenes:
+                    payload["flat_scenes"] = flat_scenes
+                    logger.info(
+                        f"✅ [Step 14] Payload MG FLAT: {width}x{height}@{fps}fps, "
+                        f"{len(flat_scenes)} cenas pré-compostas"
+                    )
+                else:
+                    logger.info(
+                        f"✅ [Step 14] Payload MG: {width}x{height}@{fps}fps, "
+                        f"{duration_frames} frames ({duration_ms}ms), "
+                        f"{len(motion_graphics)} MG layers"
+                    )
             else:
                 logger.info("📦 [Step 14] Construindo payload...")
                 payload_result = self._execute_payload_builder(
