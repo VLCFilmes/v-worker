@@ -220,7 +220,17 @@ class SubtitlePipelineService:
                 height = self._get_value(video_settings, "height", 1920)
                 duration_frames = int((duration_ms / 1000) * fps)
                 
+                # 🔧 FIX: render_service._build_render_payload() extrai canvas, fps e
+                # duration_in_frames do ROOT level do payload (não do nested project_settings).
+                # Sem essas keys no root, o render_service usa defaults errados:
+                # canvas=720x1280 e duration_in_frames=0 (→ fallback 60s no v-editor-python).
                 payload = {
+                    # ═══ Root-level keys (para render_service._build_render_payload) ═══
+                    "canvas": {"width": width, "height": height},
+                    "fps": fps,
+                    "duration_in_frames": duration_frames,
+                    
+                    # ═══ Nested (legacy/compatibilidade com v-editor-python extract_settings) ═══
                     "project_settings": {
                         "video_settings": {
                             "width": width,
@@ -242,7 +252,8 @@ class SubtitlePipelineService:
                     "duration_ms": duration_ms,
                 }
                 logger.info(f"✅ [Step 14] Payload MG: {width}x{height}@{fps}fps, "
-                            f"{duration_frames} frames, {len(motion_graphics)} MG layers")
+                            f"{duration_frames} frames ({duration_ms}ms), "
+                            f"{len(motion_graphics)} MG layers")
             else:
                 logger.info("📦 [Step 14] Construindo payload...")
                 payload_result = self._execute_payload_builder(
