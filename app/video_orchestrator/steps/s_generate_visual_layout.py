@@ -408,25 +408,46 @@ def _build_png_results_with_paths(
                 f"anim_seq={'yes' if animation_sequence else 'no'}"
             )
 
-        # Stroke reveals (masks animados)
+        # Stroke reveals (HQ PNG + luma masks animadas)
         for stroke in scene.get("stroke_reveals", []):
             stroke_id = stroke.get("id", f"stroke_{layer_index}")
-            results.append({
+
+            # Priorizar paths de arquivo (salvos pelo Playwright no volume compartilhado)
+            hq_src = stroke.get("hq_png_path") or stroke.get("hq_png_base64")
+            masks_data = stroke.get("masks", [])
+
+            if not hq_src:
+                logger.warning(f"   ⚠️ Stroke {stroke_id} sem hq_png_path/hq_png_base64, pulando")
+                layer_index += 1
+                continue
+
+            entry = {
                 "id": stroke_id,
                 "scene_id": scene_id,
                 "type": "stroke_reveal",
+                "src": hq_src,  # Path do HQ PNG (ou base64 fallback)
                 "start_time": scene_start_ms,
                 "end_time": scene_end_ms,
+                "position": {"x": 0, "y": 0, "width": canvas_w, "height": canvas_h},
                 "zIndex": 350,
                 "is_static": False,
                 "source": "visual_layout_director",
-                "hq_png_base64": stroke.get("hq_png_base64"),
-                "masks": stroke.get("masks", []),
                 "reveal": stroke.get("reveal", {}),
                 "total_frames": stroke.get("total_frames", 0),
                 "fps": stroke.get("fps", 30),
-            })
+                # Masks com paths de arquivo (para v-editor-python)
+                "masks": masks_data,
+                "masks_dir": stroke.get("masks_dir"),
+            }
+            results.append(entry)
             layer_index += 1
+
+            logger.info(
+                f"   📦 Stroke #{layer_index - 1}: {stroke_id} | "
+                f"hq={'path' if stroke.get('hq_png_path') else 'base64'} | "
+                f"masks={len(masks_data)} | "
+                f"time={scene_start_ms}-{scene_end_ms}ms"
+            )
 
     logger.info(f"   📦 motion_graphics total: {len(results)} entries")
     return results
