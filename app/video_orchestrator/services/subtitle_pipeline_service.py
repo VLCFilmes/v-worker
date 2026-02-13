@@ -307,6 +307,17 @@ class SubtitlePipelineService:
                 "sentences": positioned_sentences
             }
         
+        # ═══ Motion Graphics: skip positioning ═══
+        # Para motion_graphics, os visuais já vêm posicionados pelo LLM Director.
+        # Não há "phrases" tradicionais para posicionar — os layers são tratados
+        # como track separada (motion_graphics) no payload builder.
+        if png_results.get("source") == "visual_layout_director":
+            logger.info("🎨 [POSITIONING] motion_graphics → skip (visuais já posicionados pelo LLM)")
+            return {
+                "status": "success",
+                "sentences": []
+            }
+        
         # Se não tem positioned_sentences, calcular (fallback)
         logger.warning("⚠️ [POSITIONING] Sem positioned_sentences - calculando do zero")
         
