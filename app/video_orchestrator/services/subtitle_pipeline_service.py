@@ -205,26 +205,65 @@ class SubtitlePipelineService:
                 backgrounds = backgrounds + cartela_backgrounds
             
             # Step 14: Payload Builder
-            logger.info("📦 [Step 14] Construindo payload...")
-            payload_result = self._execute_payload_builder(
-                sentences=sentences,
-                video_url=video_url,
-                duration_ms=duration_ms,
-                template_config=template_config,
-                backgrounds=backgrounds,
-                matting_data=matting_data,
-                speech_segments=speech_segments,  # 🆕 v2.9.0
-                motion_graphics=motion_graphics   # 🆕 Motion graphics do Manim
-            )
+            # ═══ Motion Graphics: build payload direto (sem v-services) ═══
+            # Para motion_graphics, não há sentences tradicionais — os visuais
+            # são layers PNGs já posicionados pelo LLM Director. O payload_builder
+            # do v-services exige sentences, então construímos o payload inline.
+            is_mg_source = png_results.get("source") == "visual_layout_director" if png_results else False
             
-            if "error" in payload_result:
-                return {
-                    "status": "error",
-                    "step": "payload_builder",
-                    "error": payload_result["error"]
+            if is_mg_source and not sentences:
+                logger.info("📦 [Step 14] Motion Graphics → payload direto (sem v-services)")
+                project_settings = template_config.get("project-settings", {})
+                video_settings = project_settings.get("video_settings", {})
+                fps = self._get_value(video_settings, "fps", 30)
+                width = self._get_value(video_settings, "width", 1080)
+                height = self._get_value(video_settings, "height", 1920)
+                duration_frames = int((duration_ms / 1000) * fps)
+                
+                payload = {
+                    "project_settings": {
+                        "video_settings": {
+                            "width": width,
+                            "height": height,
+                            "fps": fps,
+                            "duration_in_frames": duration_frames,
+                        }
+                    },
+                    "render_settings": {
+                        "background_color": "#000000",
+                        "format": "mp4",
+                    },
+                    "tracks": {
+                        "subtitles": [],
+                        "highlights": [],
+                        "motion_graphics": motion_graphics,
+                    },
+                    "sentences": [],
+                    "duration_ms": duration_ms,
                 }
-            
-            payload = payload_result.get("payload", {})
+                logger.info(f"✅ [Step 14] Payload MG: {width}x{height}@{fps}fps, "
+                            f"{duration_frames} frames, {len(motion_graphics)} MG layers")
+            else:
+                logger.info("📦 [Step 14] Construindo payload...")
+                payload_result = self._execute_payload_builder(
+                    sentences=sentences,
+                    video_url=video_url,
+                    duration_ms=duration_ms,
+                    template_config=template_config,
+                    backgrounds=backgrounds,
+                    matting_data=matting_data,
+                    speech_segments=speech_segments,  # 🆕 v2.9.0
+                    motion_graphics=motion_graphics   # 🆕 Motion graphics do Manim
+                )
+                
+                if "error" in payload_result:
+                    return {
+                        "status": "error",
+                        "step": "payload_builder",
+                        "error": payload_result["error"]
+                    }
+                
+                payload = payload_result.get("payload", {})
             logger.info(f"✅ [Step 14] Payload construído: {len(payload.get('tracks', {}).get('subtitles', []))} subtitles")
             
             # Log backgrounds incluídos
