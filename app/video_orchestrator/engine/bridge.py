@@ -162,6 +162,9 @@ class EngineBridge:
             if storytelling_mode == "text_video":
                 logger.info(f"📝 [ENGINE] STM=text_video → usando TEXT_VIDEO_STEPS")
                 final_state = self.runner.run_text_video(job_id, state=state)
+            elif storytelling_mode == "motion_graphics":
+                logger.info(f"🎨 [ENGINE] STM=motion_graphics → usando MOTION_GRAPHICS_STEPS")
+                final_state = self.runner.run_motion_graphics(job_id, state=state)
             elif phase_1_only:
                 final_state = self.runner.run_phase1_only(job_id, state=state)
             else:

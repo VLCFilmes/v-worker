@@ -34,6 +34,12 @@ def render_step(state: PipelineState, params: dict) -> PipelineState:
         or get_env('DEFAULT_EDITOR_WORKER', 'python')
     )
 
+    # ═══ Auto-select render-pod para motion_graphics ═══
+    if state.storytelling_mode == "motion_graphics" and worker_preference != "render-pod":
+        if get_env('RENDER_POD_ENABLED', 'false').lower() == 'true':
+            logger.info(f"🎨 [RENDER] STM=motion_graphics → auto-selecionando render-pod (era: {worker_preference})")
+            worker_preference = "render-pod"
+
     service = RenderService(editor_worker_id=worker_preference)
     payload = dict(state.subtitle_payload)  # cópia
 

@@ -40,3 +40,6 @@ from . import s_title_generation  # 🆕 v4.6: Título do vídeo via Title Direc
 # 🆕 Text Video STM (steps exclusivos)
 from . import s_format_script       # Parseia tags visuais do roteiro
 from . import s_generate_timestamps  # Gera timestamps virtuais para texto puro
+
+# 🆕 Motion Graphics STM (steps exclusivos)
+from . import s_generate_visual_layout  # LLM gera HTML/CSS → Playwright → PNGs

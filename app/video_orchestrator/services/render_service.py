@@ -46,34 +46,26 @@ V_EDITOR_WORKERS = {
         'type': 'remotion',
         'description': 'Linux Home (GPU)'
     },
-    'modal': {
-        'url': os.environ.get('V_EDITOR_MODAL_URL', 'https://fotovinicius2--v-editor-render-sync.modal.run'),
-        'endpoint': '',  # Modal usa endpoint direto
-        'type': 'modal',
-        'description': 'Modal Cloud (CPU 8-core + 32GB)'
-    },
-    # 🆕 v2.9.210: Modal Light - 4x mais barato!
-    'modal-light': {
-        'url': 'https://fotovinicius2--v-editor-render-light-sync.modal.run',
-        'endpoint': '',  # Modal usa endpoint direto
-        'type': 'modal',
-        'description': 'Modal Cloud LIGHT (CPU 2-core + 8GB) - 4x mais barato!'
-    },
-    # 🆕 v2.9.250: v-editor-python - Editor Python/MoviePy (alternativa ao Remotion)
-    # Nota: Container escuta em 5018 (interno), exposto externamente em 5019
-    # Na rede Docker, usa porta interna (5018). Externamente usa 5019.
+    # v-editor-python — container local (MoviePy)
     'python': {
         'url': os.environ.get('V_EDITOR_PYTHON_URL', 'http://v-editor-python:5018'),
         'endpoint': '/render',
         'type': 'python',
-        'description': 'Python/MoviePy Editor (CPU) - Alternativa ao Remotion'
+        'description': 'Python/MoviePy Editor (CPU) - Hetzner'
     },
     'python-local': {
         'url': os.environ.get('V_EDITOR_PYTHON_LOCAL_URL', 'http://localhost:5019'),
         'endpoint': '/render',
         'type': 'python',
         'description': 'Python/MoviePy Editor Local (Dev)'
-    }
+    },
+    # v3.1.0: Render Pod no Modal (via SDK — sem web endpoint, sem timeout HTTP)
+    'render-pod': {
+        'url': None,  # Nao usa HTTP — chamado via Modal SDK
+        'endpoint': None,
+        'type': 'render-pod',
+        'description': 'Modal Render Pod (CPU 4-core + 16GB) - SDK .remote()'
+    },
 }
 
 # URL do webhook de callback
@@ -109,13 +101,22 @@ class RenderService:
         
         if editor_worker_id and editor_worker_id in V_EDITOR_WORKERS:
             self.worker_config = V_EDITOR_WORKERS[editor_worker_id]
-            self.v_editor_url = self.worker_config['url']
-            self.endpoint = f"{self.v_editor_url}{self.worker_config['endpoint']}"
             self.is_modal = self.worker_config['type'] == 'modal'
-            logger.info(f"🎬 [WORKER:{editor_worker_id}] Render Service: {self.endpoint}")
+            self.is_render_pod = self.worker_config['type'] == 'render-pod'
+
+            if self.is_render_pod:
+                # Render Pod usa Modal SDK — sem URL HTTP
+                self.v_editor_url = None
+                self.endpoint = None
+                logger.info(f"🎬 [WORKER:render-pod] Render Service via Modal SDK")
+            else:
+                self.v_editor_url = self.worker_config['url']
+                self.endpoint = f"{self.v_editor_url}{self.worker_config['endpoint']}"
+                logger.info(f"🎬 [WORKER:{editor_worker_id}] Render Service: {self.endpoint}")
         else:
             # Fallback: comportamento legado
             self.is_modal = False
+            self.is_render_pod = False
             
             # 🆕 v2.9.97: Escolher editor baseado em ENV ou parâmetro
             self.use_ffmpeg = use_ffmpeg if use_ffmpeg is not None else USE_FFMPEG_EDITOR
@@ -159,22 +160,31 @@ class RenderService:
         (como zoom_keyframes) e adicionando/atualizando URLs se necessário.
         
         🆕 v2.10.9: Suporte a zoom_keyframes e outras configurações customizadas
+        🔧 FIX: Em modo solid, nunca retornar video_base do payload original
         """
         # Obter base_layer existente no payload (se houver)
         existing_base_layer = payload.get("base_layer", {})
+        if not isinstance(existing_base_layer, dict):
+            existing_base_layer = {}
         
         if video_url:
             # Modo vídeo: Preservar video_base existente e adicionar URLs
             video_base = existing_base_layer.get("video_base", {})
+            if not isinstance(video_base, dict):
+                video_base = {}
             video_base["urls"] = [video_url]  # Atualizar/adicionar URLs
             
             return {
                 "video_base": video_base
             }
         else:
-            # Modo solid: Retornar configuração padrão ou existente
-            return existing_base_layer if existing_base_layer else {
-                "solid_base": {
+            # Modo solid: NUNCA retornar video_base — extrair apenas solid_base
+            solid_base = existing_base_layer.get("solid_base", {})
+            if not isinstance(solid_base, dict):
+                solid_base = {}
+            
+            return {
+                "solid_base": solid_base if solid_base else {
                     "color": "#000000",
                     "opacity": 1
                 }
@@ -353,7 +363,11 @@ class RenderService:
         is_async_editor = not getattr(self, 'use_ffmpeg', False)
         
         try:
-            # 🆕 v2.9.200: Modal tem comportamento diferente (síncrono, payload adaptado)
+            # v3.1.0: Render Pod (Modal SDK — sem HTTP)
+            if self.is_render_pod:
+                return self._submit_to_render_pod(job_id, render_payload, user_id, project_id)
+
+            # v2.9.200: Modal HTTP endpoint (legado, desativado)
             if self.is_modal:
                 return self._submit_to_modal(job_id, render_payload, webhook_url)
             
@@ -473,6 +487,96 @@ class RenderService:
         
         return transformed
     
+    def _submit_to_render_pod(
+        self,
+        job_id: str,
+        render_payload: Dict[str, Any],
+        user_id: str = None,
+        project_id: str = None,
+    ) -> Dict[str, Any]:
+        """
+        v3.1.0: Submete render para v-render-pod via Modal SDK.
+
+        Diferente do _submit_to_modal:
+        - Usa Modal SDK (.remote()) em vez de HTTP
+        - Sem timeout HTTP (pode rodar horas)
+        - Sem web endpoint (zero quota consumida)
+        """
+        logger.info(f"🎬 [RENDER-POD] Submetendo render via Modal SDK...")
+
+        try:
+            from .render_pod_client import get_render_pod_client
+            client = get_render_pod_client()
+
+            # Extrair dados do render_payload para o formato do pod
+            tracks = render_payload.get("tracks", {})
+            project_settings = render_payload.get("project_settings", {})
+            video_settings = project_settings.get("video_settings", {})
+            base_layer = render_payload.get("base_layer", {})
+
+            # Converter payload v-editor → formato scenes do pod
+            # Cada "scene" = o video inteiro com suas layers
+            video_base = base_layer.get("video_base", {})
+            base_video_url = None
+            if video_base and video_base.get("urls"):
+                base_video_url = video_base["urls"][0]
+
+            # Montar scenes a partir das tracks (subtitles, etc.)
+            scenes = [{
+                "duration": video_settings.get("duration_in_frames", 900) / video_settings.get("fps", 30),
+                "layers": [],  # PNGs serao renderizados no pod
+                "base_video_url": base_video_url,
+            }]
+
+            # Adicionar layers de motion_graphics se existirem
+            mg_layers = tracks.get("motion_graphics", [])
+            for mg in mg_layers:
+                if mg.get("html"):
+                    scenes[0]["layers"].append({
+                        "html": mg["html"],
+                        "animation": mg.get("animation"),
+                    })
+
+            result = client.render(
+                job_id=job_id,
+                scenes=scenes,
+                project_settings={
+                    "width": video_settings.get("width", 720),
+                    "height": video_settings.get("height", 1280),
+                    "fps": video_settings.get("fps", 30),
+                },
+                user_id=user_id,
+                project_path=f"users/{user_id}/projects/{project_id}" if user_id and project_id else None,
+                upload_to_b2=True,
+            )
+
+            if result.get("status") == "success":
+                video_url = result.get("video_url")
+                metrics = result.get("metrics", {})
+                logger.info(f"✅ [RENDER-POD] Concluido em {metrics.get('total_time', 0):.1f}s")
+                logger.info(f"   📎 URL: {video_url[:80] if video_url else 'N/A'}...")
+                return {
+                    "status": "success",
+                    "render_status": "completed",
+                    "job_id": job_id,
+                    "output_url": video_url,
+                    "b2_url": video_url,
+                    "render_time_seconds": metrics.get("total_time"),
+                    "total_time_seconds": metrics.get("total_time"),
+                    "file_size_bytes": int(metrics.get("output_size_mb", 0) * 1024 * 1024),
+                    "message": f"Render Pod completed in {metrics.get('total_time', 0):.1f}s",
+                    "worker": "render-pod",
+                }
+            else:
+                error_msg = result.get("error", "Unknown Render Pod error")
+                logger.error(f"❌ [RENDER-POD] Erro: {error_msg}")
+                return {"status": "error", "error": error_msg}
+
+        except Exception as e:
+            error_msg = f"Render Pod SDK error: {str(e)}"
+            logger.error(f"❌ [RENDER-POD] {error_msg}", exc_info=True)
+            return {"status": "error", "error": error_msg}
+
     def _submit_to_modal(
         self,
         job_id: str,
@@ -874,7 +978,18 @@ class RenderService:
         logger.info(f"   - Base type: {render_payload.get('base_type')}")
         logger.info(f"   - Video URL do payload original: {payload.get('video_url', 'AUSENTE')[:80] if payload.get('video_url') else 'AUSENTE'}")
         logger.info(f"   - Video URL final: {video_url[:80] + '...' if video_url and len(video_url) > 80 else video_url}")
-        logger.info(f"   - base_layer.video_base.urls: {render_payload.get('base_layer', {}).get('video_base', {}).get('urls', [])[:1] if render_payload.get('base_layer', {}).get('video_base') else 'N/A'}")
+        # Log seguro do base_layer (evitar crash se urls não for lista)
+        try:
+            _bl = render_payload.get('base_layer', {})
+            _vb = _bl.get('video_base') if isinstance(_bl, dict) else None
+            if _vb and isinstance(_vb, dict):
+                _urls = _vb.get('urls', [])
+                logger.info(f"   - base_layer.video_base.urls: {list(_urls)[:1] if isinstance(_urls, (list, tuple)) else _urls}")
+            else:
+                _sb = _bl.get('solid_base') if isinstance(_bl, dict) else None
+                logger.info(f"   - base_layer: solid_base={_sb}")
+        except Exception as _e:
+            logger.info(f"   - base_layer: (erro ao logar: {_e})")
         
         return render_payload
     

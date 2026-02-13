@@ -136,6 +136,19 @@ TEXT_VIDEO_STEPS = [
 ]
 
 
+# 🆕 STM Motion Graphics: Pipeline sem vídeo (roteiro → LLM visual layout → PNGs → vídeo)
+MOTION_GRAPHICS_STEPS = [
+    'load_template',            # 1. Carrega template (palette, fonts, mood)
+    'format_script',            # 2. Parseia tags visuais → clean_text + scene_overrides
+    'generate_timestamps',      # 3. clean_text → transcription_words (virtual TTS)
+    'fraseamento',              # 4. Agrupa palavras em frases (para timing)
+    'generate_visual_layout',   # 5. ★ LLM gera HTML/CSS → Playwright → PNGs em camadas
+    'subtitle_pipeline',        # 6. Payload para v-editor
+    'title_generation',         # 7. Título do vídeo
+    'render',                   # 8. Renderização final (v-editor-python composita)
+]
+
+
 class AutoRunner:
     """
     Executa pipeline com lista fixa de steps (sem LLM).
@@ -211,6 +224,19 @@ class AutoRunner:
         if state and state.storytelling_mode != "text_video":
             state = state.with_updates(storytelling_mode="text_video")
         return self.engine.run(job_id, TEXT_VIDEO_STEPS, initial_state=state)
+
+    def run_motion_graphics(self, job_id: str,
+                            state: PipelineState = None) -> PipelineState:
+        """
+        Pipeline Motion Graphics (roteiro → LLM visual layout → PNGs → vídeo).
+
+        Usa MOTION_GRAPHICS_STEPS: format_script → generate_timestamps → fraseamento
+        → generate_visual_layout (LLM + Playwright) → subtitle_pipeline → render.
+        """
+        logger.info(f"🎨 [AUTO] Pipeline MOTION_GRAPHICS para {job_id[:8]}...")
+        if state and state.storytelling_mode != "motion_graphics":
+            state = state.with_updates(storytelling_mode="motion_graphics")
+        return self.engine.run(job_id, MOTION_GRAPHICS_STEPS, initial_state=state)
 
     def run_custom(self, job_id: str,
                    steps: List[str],
