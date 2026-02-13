@@ -1171,6 +1171,11 @@ class TemplateLoaderService:
             
             # Setar base_type
             config["base_layer"]["base_type"] = {"value": implied_base_type}
+            
+            # 🔧 FIX: Sincronizar "base-layer" (dash) com "base_layer" (underscore)
+            # Após o _deep_merge, as duas chaves podem apontar para objetos diferentes.
+            # Vários consumers (ex: subtitle_pipeline_service) leem "base-layer" primeiro.
+            config["base-layer"] = config["base_layer"]
         
         return config
 

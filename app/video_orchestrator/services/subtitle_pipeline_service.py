@@ -100,7 +100,7 @@ class SubtitlePipelineService:
                 "png_sentences_count": len(png_results.get("sentences", [])) if png_results else 0,
                 "backgrounds_count": len(png_results.get("backgrounds", [])) if png_results else 0,
                 "template_config_keys": list(template_config.keys()) if template_config else [],
-                "base_layer": template_config.get("base-layer", template_config.get("base_layer")),
+                "base_layer": template_config.get("base_layer", template_config.get("base-layer")),
                 "user_id": user_id,
                 "project_id": project_id
             })
@@ -398,7 +398,9 @@ class SubtitlePipelineService:
         animation_config = template_config.get("animation-config", {})
         multi_text_styling = template_config.get("multi-text-styling", {})
         z_index_config = template_config.get("z-index-hierarchy", {})
-        base_layer = template_config.get("base-layer", template_config.get("base_layer", {}))
+        # 🔧 FIX: Preferir base_layer (underscore) pois _apply_implication_rules
+        # atualiza base_type nessa chave. "base-layer" (dash) pode estar desatualizada.
+        base_layer = template_config.get("base_layer", template_config.get("base-layer", {}))
         
         # Configurações de animação
         subtitles_anim = animation_config.get("subtitles", {})
