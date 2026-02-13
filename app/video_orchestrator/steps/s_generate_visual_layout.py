@@ -164,9 +164,22 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
         )
 
     # ─── Upload PNGs para B2 e montar png_results ───
-    png_results = _upload_and_build_png_results(
+    layers_list = _upload_and_build_png_results(
         rendered_scenes, state, canvas_w, canvas_h
     )
+
+    # Wrap em dict compatível com subtitle_pipeline_service
+    # (que espera .get("sentences"), .get("backgrounds"), etc.)
+    png_results = {
+        "status": "success",
+        "sentences": [],
+        "positioned_sentences": [],
+        "backgrounds": [],
+        "motion_graphics": layers_list,
+        "total_pngs": len(layers_list),
+        "phrases": [],
+        "source": "visual_layout_director",
+    }
 
     elapsed = time.time() - start
     logger.info(f"⏱️ [VISUAL_LAYOUT] Concluído em {elapsed:.1f}s")
