@@ -157,6 +157,13 @@ class CartelaService:
         """
         Gera cartelas para as frases que precisam.
         
+        Suporta duas fontes de configuração:
+        1. Template: _text_styles.*.cartela_config (presets visuais)
+        2. Roteiro: sentence.cartela_override (tags [CARTELA: cor] do script)
+        
+        Se o roteiro define cartela mas o template não tem preset, gera um
+        preset solid sintético baseado na cor do roteiro.
+        
         Args:
             sentences: Lista de frases com style_type e cartela_preset_id
             template_config: Config do template com _text_styles
@@ -171,7 +178,7 @@ class CartelaService:
         # 🐛 FIX: Usar 'or {}' para tratar valores None explícitos
         text_styles = template_config.get('_text_styles') or {}
         
-        # Coletar presets de cartela ativos
+        # Coletar presets de cartela ativos (do template)
         active_presets = []
         for style_name, style_config in text_styles.items():
             # 🐛 FIX: style_config pode ser None se estilo não configurado
@@ -194,8 +201,16 @@ class CartelaService:
                 active_presets.append(preset)
                 logger.info(f"🎬 Preset de cartela ativo: {style_name} ({preset['type']})")
         
+        # 🆕 Se o template não tem cartela mas o roteiro define [CARTELA: ...],
+        # criar presets sintéticos a partir dos overrides do roteiro
         if not active_presets:
-            logger.info("🎬 Nenhuma cartela configurada - pulando")
+            script_presets = self._build_script_cartela_presets(sentences)
+            if script_presets:
+                active_presets = script_presets
+                logger.info(f"🎬 {len(script_presets)} preset(s) de cartela criados a partir do roteiro")
+        
+        if not active_presets:
+            logger.info("🎬 Nenhuma cartela configurada (template ou roteiro) - pulando")
             return {
                 'status': 'skipped',
                 'reason': 'Nenhuma cartela configurada',
@@ -260,6 +275,52 @@ class CartelaService:
                 'stats': {'total': 0}
             }
     
+    def _build_script_cartela_presets(self, sentences: List[Dict]) -> List[Dict]:
+        """
+        🆕 Cria presets de cartela sintéticos a partir de overrides do roteiro.
+        
+        Quando o template não tem cartela configurada mas o roteiro tem tags
+        [CARTELA: cor], criamos presets solid com as cores do roteiro.
+        
+        Args:
+            sentences: Lista de frases com possíveis cartela_override
+            
+        Returns:
+            Lista de presets sintéticos (ou vazio se não houver overrides)
+        """
+        # Coletar cores únicas dos overrides do roteiro
+        colors_seen = {}
+        for sentence in sentences:
+            override = sentence.get('cartela_override', {})
+            if override.get('enabled'):
+                color = override.get('color', '#000000')
+                opacity = override.get('opacity', 0.85)
+                if color not in colors_seen:
+                    colors_seen[color] = opacity
+        
+        if not colors_seen:
+            return []
+        
+        presets = []
+        for idx, (color, opacity) in enumerate(colors_seen.items()):
+            preset_id = f"script_cartela_{idx}"
+            preset = {
+                'id': preset_id,
+                'type': 'solid',
+                'layout': 'fullscreen',
+                'solid_config': {
+                    'color': {'value': color},
+                    'opacity': {'value': opacity},
+                },
+                # 🆕 Marcar como originado do roteiro
+                '_from_script': True,
+                '_script_color': color,
+            }
+            presets.append(preset)
+            logger.info(f"🎬 Preset sintético do roteiro: {preset_id} (solid, cor={color}, opacidade={opacity})")
+        
+        return presets
+    
     def assign_cartelas_to_phrases(
         self,
         sentences: List[Dict],
@@ -300,6 +361,7 @@ class CartelaService:
             # 🆕 PRIORIDADE 1: Olhar diretamente na própria sentence (vem do merge com processedPhrases)
             use_cartela = sentence.get('use_cartela', None)
             style_type = sentence.get('style_type', 'default')
+            cartela_override = sentence.get('cartela_override', {})
             
             # 🆕 PRIORIDADE 2: Fallback para phrase_classification do template
             if use_cartela is None:
@@ -313,60 +375,140 @@ class CartelaService:
                 else:
                     use_cartela = False
             
-            if use_cartela and style_type in cartela_map:
-                base_cartela = cartela_map[style_type]
-                
-                # 🎬 Para cartelas de vídeo, selecionar um vídeo DIFERENTE para cada frase
-                if base_cartela.get('type') == 'asset_video':
-                    collection_id = base_cartela.get('collection_id')
-                    canvas_width = base_cartela.get('canvas_width', 1080)
-                    canvas_height = base_cartela.get('canvas_height', 1920)
-                    
-                    if collection_id:
-                        # Determinar aspect ratio
-                        target_aspect = "9:16" if canvas_height > canvas_width else "16:9"
-                        
-                        # Selecionar vídeo único para esta frase
-                        selected_video = self._select_video_from_collection(
-                            collection_id=collection_id,
-                            target_aspect=target_aspect
-                        )
-                        
-                        if selected_video:
-                            # Criar cópia da cartela com vídeo específico para esta frase
-                            phrase_cartela = base_cartela.copy()
-                            phrase_cartela['video_url'] = selected_video.get('url')
-                            phrase_cartela['video_id'] = selected_video.get('id')
-                            phrase_cartela['width'] = canvas_width
-                            phrase_cartela['height'] = canvas_height
-                            
-                            # Incluir duração do vídeo para loop correto
-                            video_duration = selected_video.get('duration')
-                            if video_duration is None:
-                                duration_ms = selected_video.get('duration_ms')
-                                if duration_ms:
-                                    video_duration = duration_ms / 1000.0
-                                else:
-                                    video_duration = 10.0  # Default
-                            
-                            phrase_cartela['video_duration'] = video_duration
-                            phrase_cartela['video_duration_frames'] = int(video_duration * 30)
-                            
-                            sentence['cartela_info'] = phrase_cartela
-                            logger.info(f"🎬 Frase {i}: vídeo selecionado '{selected_video.get('url', 'N/A')[:50]}...' (duration={video_duration}s)")
-                        else:
-                            logger.warning(f"⚠️ Frase {i}: Nenhum vídeo disponível na collection")
-                    else:
-                        logger.warning(f"⚠️ Frase {i}: collection_id não configurado")
-                else:
-                    # Cartelas não-vídeo (solid, gradient, etc.) - usar direto
-                    sentence['cartela_info'] = base_cartela
-                    logger.info(f"🎬 Frase {i}: cartela '{style_type}' atribuída")
-                    
-            elif use_cartela:
-                logger.warning(f"⚠️ Frase {i}: use_cartela=True mas estilo '{style_type}' não tem cartela")
-            else:
+            if not use_cartela:
                 logger.debug(f"🎬 Frase {i}: sem cartela (use_cartela=False)")
+                continue
+            
+            # 🆕 Resolver cartela: template preset OU preset sintético do roteiro
+            base_cartela = None
+            
+            # Tentar match pelo style_type no cartela_map (presets do template)
+            if style_type in cartela_map:
+                base_cartela = cartela_map[style_type]
+            
+            # 🆕 Se não encontrou por style_type, tentar presets sintéticos do roteiro
+            if not base_cartela and cartela_override.get('enabled'):
+                script_color = cartela_override.get('color', '#000000')
+                # Procurar preset sintético que corresponde à cor do override
+                for key, cartela in cartela_map.items():
+                    if cartela.get('_from_script') and cartela.get('_script_color') == script_color:
+                        base_cartela = cartela
+                        break
+                # Se não encontrou preset correspondente, usar o primeiro preset disponível
+                if not base_cartela and cartela_map:
+                    base_cartela = next(iter(cartela_map.values()))
+            
+            if not base_cartela:
+                logger.warning(f"⚠️ Frase {i}: use_cartela=True mas nenhum preset disponível "
+                             f"(style='{style_type}', override={bool(cartela_override)})")
+                continue
+            
+            # 🎬 Para cartelas de vídeo, selecionar um vídeo DIFERENTE para cada frase
+            if base_cartela.get('type') == 'asset_video':
+                collection_id = base_cartela.get('collection_id')
+                canvas_width = base_cartela.get('canvas_width', 1080)
+                canvas_height = base_cartela.get('canvas_height', 1920)
+                
+                if collection_id:
+                    # Determinar aspect ratio
+                    target_aspect = "9:16" if canvas_height > canvas_width else "16:9"
+                    
+                    # Selecionar vídeo único para esta frase
+                    selected_video = self._select_video_from_collection(
+                        collection_id=collection_id,
+                        target_aspect=target_aspect
+                    )
+                    
+                    if selected_video:
+                        # Criar cópia da cartela com vídeo específico para esta frase
+                        phrase_cartela = base_cartela.copy()
+                        phrase_cartela['video_url'] = selected_video.get('url')
+                        phrase_cartela['video_id'] = selected_video.get('id')
+                        phrase_cartela['width'] = canvas_width
+                        phrase_cartela['height'] = canvas_height
+                        
+                        # Incluir duração do vídeo para loop correto
+                        video_duration = selected_video.get('duration')
+                        if video_duration is None:
+                            duration_ms = selected_video.get('duration_ms')
+                            if duration_ms:
+                                video_duration = duration_ms / 1000.0
+                            else:
+                                video_duration = 10.0  # Default
+                        
+                        phrase_cartela['video_duration'] = video_duration
+                        phrase_cartela['video_duration_frames'] = int(video_duration * 30)
+                        
+                        sentence['cartela_info'] = phrase_cartela
+                        logger.info(f"🎬 Frase {i}: vídeo selecionado '{selected_video.get('url', 'N/A')[:50]}...' (duration={video_duration}s)")
+                    else:
+                        logger.warning(f"⚠️ Frase {i}: Nenhum vídeo disponível na collection")
+                else:
+                    logger.warning(f"⚠️ Frase {i}: collection_id não configurado")
+            else:
+                # Cartelas não-vídeo (solid, gradient, etc.) - usar preset do template
+                phrase_cartela = base_cartela.copy()
+                
+                # 🆕 Aplicar overrides do roteiro sobre o preset do template
+                if cartela_override.get('enabled'):
+                    phrase_cartela = self._apply_script_override(phrase_cartela, cartela_override, i)
+                
+                sentence['cartela_info'] = phrase_cartela
+                source = "roteiro" if cartela_override.get('enabled') else f"template/{style_type}"
+                logger.info(f"🎬 Frase {i}: cartela atribuída (source={source})")
         
         return sentences
+    
+    def _apply_script_override(
+        self,
+        cartela: Dict[str, Any],
+        override: Dict[str, Any],
+        sentence_idx: int
+    ) -> Dict[str, Any]:
+        """
+        🆕 Aplica overrides do roteiro ([CARTELA: cor]) sobre um preset de cartela.
+        
+        O roteiro pode especificar:
+        - color: Sobrescreve a cor (solid_config.color ou gradient_config.color_start)
+        - opacity: Sobrescreve a opacidade
+        - type: Pode mudar de solid para gradient etc. (futuro)
+        
+        Args:
+            cartela: Preset de cartela (do template ou sintético)
+            override: Overrides do roteiro {enabled, color, opacity?, type?}
+            sentence_idx: Índice da frase (para logging)
+            
+        Returns:
+            Cartela com overrides aplicados
+        """
+        result = dict(cartela)
+        
+        override_color = override.get('color')
+        override_opacity = override.get('opacity')
+        
+        if override_color:
+            cartela_type = result.get('type', 'solid')
+            
+            if cartela_type == 'solid':
+                # Sobrescrever cor do solid
+                if 'solid_config' not in result:
+                    result['solid_config'] = {}
+                result['solid_config']['color'] = {'value': override_color}
+                logger.info(f"   📝 Frase {sentence_idx}: cor sobrescrita pelo roteiro → {override_color}")
+                
+            elif cartela_type == 'gradient':
+                # Sobrescrever cor primária do gradiente
+                if 'gradient_config' not in result:
+                    result['gradient_config'] = {}
+                result['gradient_config']['color_start'] = {'value': override_color}
+                logger.info(f"   📝 Frase {sentence_idx}: cor gradiente sobrescrita pelo roteiro → {override_color}")
+        
+        if override_opacity is not None:
+            if 'solid_config' in result:
+                result['solid_config']['opacity'] = {'value': override_opacity}
+            elif 'gradient_config' in result:
+                result['gradient_config']['opacity'] = {'value': override_opacity}
+            logger.info(f"   📝 Frase {sentence_idx}: opacidade sobrescrita pelo roteiro → {override_opacity}")
+        
+        return result
 

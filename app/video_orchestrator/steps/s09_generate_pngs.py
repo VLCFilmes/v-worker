@@ -62,9 +62,14 @@ def generate_pngs_step(state: PipelineState, params: dict) -> PipelineState:
         (style or {}).get('cartela_config', {}).get('enabled')
         for style in text_styles.values()
     )
+    # 🆕 Também checar cartela overrides do roteiro (tags [CARTELA: ...])
+    has_script_cartela = any(
+        pg.get('cartela_override', {}).get('enabled')
+        for pg in phrase_groups
+    )
     cartela_results = None
 
-    if has_cartela:
+    if has_cartela or has_script_cartela:
         logger.info("🎬 [CARTELAS] Gerando cartelas...")
         cartela_service = CartelaService()
         cartela_result = cartela_service.generate_cartelas(
