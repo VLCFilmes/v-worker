@@ -29,6 +29,31 @@ def load_template_step(state: PipelineState, params: dict) -> PipelineState:
         template_id = _get_template_id_for_project(state.project_id)
 
     if not template_id:
+        # ═══ Motion Graphics: template é opcional ═══
+        # Para motion_graphics, o LLM Director gera os visuais.
+        # Template só forneceria palette/fonts/mood, mas não é obrigatório.
+        if getattr(state, 'storytelling_mode', '') == 'motion_graphics':
+            logger.info(f"🎨 [TEMPLATE] motion_graphics sem template → usando defaults (1080x1920)")
+            default_config = {
+                'project-settings': {
+                    'video_settings': {
+                        'width': 1080,
+                        'height': 1920,
+                    }
+                },
+                'multi-text-styling': {
+                    'text_styles': {}
+                },
+                '_text_styles': {},
+            }
+            return state.with_updates(
+                template_id='motion_graphics_default',
+                template_config=default_config,
+                text_styles={},
+                enabled_types=['default'],
+                video_width=1080,
+                video_height=1920,
+            )
         raise ValueError(f"Nenhum template_id encontrado para projeto {state.project_id}")
 
     loader = TemplateLoaderService()

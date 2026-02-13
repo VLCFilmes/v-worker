@@ -322,6 +322,17 @@ class JobManager:
             has_text: Se foi fornecido texto (pula transcrição)
             has_phrases: Se foram fornecidas frases prontas (pula phrase_grouping)
         """
+        # ═══ Motion Graphics: pipeline dedicado ═══
+        storytelling_mode = options.get('storytelling_mode', '')
+        if storytelling_mode == 'motion_graphics':
+            mg_steps = [
+                'load_template', 'format_script', 'generate_timestamps',
+                'fraseamento', 'generate_visual_layout', 'subtitle_pipeline',
+                'title_generation', 'render'
+            ]
+            logger.info(f"📋 Steps MOTION_GRAPHICS: {mg_steps}")
+            return [ProcessingStep(name=s) for s in mg_steps]
+        
         steps = []
         skip_video_processing = options.get('skip_video_processing', False) or video_count == 0
         phase_1_only = options.get('phase_1_only', False)  # 🆕 Pipeline 2 Fases
