@@ -585,6 +585,12 @@ class RenderService:
         duration_in_frames = payload.get("duration_in_frames", 0)
         video_url = payload.get("video_url", "")
         
+        # 🔧 FIX: Tratar placeholders do payload_builder como "sem vídeo"
+        # text_video mode usa solid background, não tem vídeo de entrada
+        if video_url and video_url.startswith("__"):
+            logger.info(f"📝 [TEXT_VIDEO] Placeholder detectado: {video_url} → modo solid (sem vídeo)")
+            video_url = ""
+        
         # Se a URL é do B2 privado, SEMPRE gerar nova URL assinada
         # (URLs assinadas expiram, então regeneramos para garantir acesso)
         if video_url and "vinicius-ai-cdn-global" in video_url:
