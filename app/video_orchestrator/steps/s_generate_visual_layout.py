@@ -8,15 +8,13 @@ calculate_positions, generate_backgrounds, cartelas.
 Fluxo:
 1. Lê scene_overrides (do format_script) + template_style
 2. Chama v-llm-directors /render/full-pipeline (LLM gera HTML → Playwright renderiza PNGs)
-3. Salva PNGs no B2 storage
-4. Monta png_results + phrase_groups com metadata de animação
-5. Passa para subtitle_pipeline → render
+3. PNGs são salvos diretamente no volume compartilhado (/app/shared)
+4. Monta png_results com paths + timing compatíveis com v-editor-python
+5. Passa para subtitle_pipeline → render (v-editor-python)
 """
 
 from ._base import *
 
-import json
-import base64
 import requests
 import time
 
@@ -24,6 +22,9 @@ import time
 V_LLM_DIRECTORS_URL = get_env('V_LLM_DIRECTORS_URL', 'http://v-llm-directors:5025')
 FULL_PIPELINE_ENDPOINT = f"{V_LLM_DIRECTORS_URL}/render/full-pipeline"
 LLM_DIRECTOR_TIMEOUT = int(get_env('LLM_DIRECTOR_TIMEOUT', '120'))
+
+# Diretório base no volume compartilhado (montado em v-llm-directors e v-editor-python)
+SHARED_VOLUME_BASE = "/app/shared/temp_frames"
 
 
 @register_step(
@@ -46,6 +47,7 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
     """
     Step principal do STM motion_graphics.
     Chama v-llm-directors para gerar HTML/CSS e renderizar PNGs.
+    PNGs são salvos no volume compartilhado para acesso direto pelo v-editor-python.
     """
     start = time.time()
 
@@ -56,8 +58,12 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
     script_text = state.transcription_text or ""
 
     # Canvas: prioridade → template → default
-    canvas_w = template_config.get("canvas_width", 720)
-    canvas_h = template_config.get("canvas_height", 1280)
+    project_settings = template_config.get("project-settings", template_config.get("project_settings", {}))
+    video_settings = project_settings.get("video_settings", {})
+
+    canvas_w = _get_value(video_settings, "width") or template_config.get("canvas_width", 720)
+    canvas_h = _get_value(video_settings, "height") or template_config.get("canvas_height", 1280)
+    fps = _get_value(video_settings, "fps") or 30
     canvas = {"width": canvas_w, "height": canvas_h}
 
     # Template style (cores, fontes, mood)
@@ -94,11 +100,15 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
             for w in (state.transcription_words or [])[:50]  # Limitar
         ]
 
+    # ─── Diretório de saída no volume compartilhado ───
+    output_dir = f"{SHARED_VOLUME_BASE}/{state.job_id}/visual_layout"
+
     logger.info(f"🎨 [VISUAL_LAYOUT] Gerando layout visual...")
     logger.info(f"   Prompt: {user_prompt[:100]}...")
-    logger.info(f"   Canvas: {canvas_w}x{canvas_h}")
+    logger.info(f"   Canvas: {canvas_w}x{canvas_h} @{fps}fps")
     logger.info(f"   Scenes: {len(scene_descriptions)}")
     logger.info(f"   Style: {template_style.get('mood', 'N/A')}")
+    logger.info(f"   Output: {output_dir}")
 
     # ─── Chamar v-llm-directors /render/full-pipeline ───
     payload = {
@@ -108,6 +118,9 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
         "script_text": script_text,
         "scene_descriptions": scene_descriptions,
         "timestamps": timestamps,
+        "output_dir": output_dir,
+        "render_animations": True,
+        "fps": fps,
     }
 
     try:
@@ -163,13 +176,22 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
             f"(model: {llm_usage.get('model', 'N/A')})"
         )
 
-    # ─── Upload PNGs para B2 e montar png_results ───
-    layers_list = _upload_and_build_png_results(
-        rendered_scenes, state, canvas_w, canvas_h
+    # ─── Calcular timing das cenas ───
+    duration_ms = getattr(state, "duration_ms", None) or 0
+    if not duration_ms and timestamps:
+        # Calcular duração total a partir dos timestamps
+        duration_ms = max(t.get("end", 0) for t in timestamps)
+
+    scene_timings = _compute_scene_timings(
+        rendered_scenes, scene_overrides, timestamps, duration_ms
+    )
+
+    # ─── Montar png_results com paths e timing ───
+    layers_list = _build_png_results_with_paths(
+        rendered_scenes, scene_timings, canvas_w, canvas_h, fps
     )
 
     # Wrap em dict compatível com subtitle_pipeline_service
-    # (que espera .get("sentences"), .get("backgrounds"), etc.)
     png_results = {
         "status": "success",
         "sentences": [],
@@ -201,6 +223,14 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
 # ═══════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════
+
+
+def _get_value(settings_dict: Dict, key: str) -> Any:
+    """Extrai valor de formato {value: x} ou valor direto."""
+    raw = settings_dict.get(key)
+    if isinstance(raw, dict):
+        return raw.get("value")
+    return raw
 
 
 def _extract_template_style(template_config: Dict) -> Dict:
@@ -241,64 +271,150 @@ def _extract_template_style(template_config: Dict) -> Dict:
     return style
 
 
-def _upload_and_build_png_results(
+def _compute_scene_timings(
     rendered_scenes: List[Dict],
-    state: PipelineState,
-    canvas_w: int,
-    canvas_h: int,
+    scene_overrides: List[Dict],
+    timestamps: List[Dict],
+    total_duration_ms: float,
 ) -> List[Dict]:
     """
-    Converte rendered_scenes em png_results compatível com subtitle_pipeline.
+    Calcula start_ms e end_ms para cada cena.
 
-    Para a Fase 1, salvamos PNGs como base64 no state (sem upload B2).
-    O upload B2 será adicionado quando integrarmos com o render final.
+    Estratégia:
+    1. Se temos timestamps, divide proporcionalmente pela quantidade de texto.
+    2. Senão, divide igualmente pela quantidade de cenas.
     """
-    png_results = []
+    num_scenes = len(rendered_scenes)
+    if num_scenes == 0:
+        return []
+
+    if total_duration_ms <= 0:
+        # Fallback: 5 segundos por cena
+        total_duration_ms = num_scenes * 5000
+
+    # Divisão igual por cena (v1 simplificada)
+    scene_duration_ms = total_duration_ms / num_scenes
+    timings = []
+
+    for i in range(num_scenes):
+        timings.append({
+            "scene_index": i,
+            "start_ms": round(i * scene_duration_ms),
+            "end_ms": round((i + 1) * scene_duration_ms),
+        })
+
+    logger.info(f"   ⏱️ Scene timings: {num_scenes} cenas, "
+                f"~{scene_duration_ms:.0f}ms cada, total={total_duration_ms:.0f}ms")
+
+    return timings
+
+
+def _build_png_results_with_paths(
+    rendered_scenes: List[Dict],
+    scene_timings: List[Dict],
+    canvas_w: int,
+    canvas_h: int,
+    fps: int,
+) -> List[Dict]:
+    """
+    Converte rendered_scenes em motion_graphics list para v-editor-python.
+
+    Cada layer gera um entry compatível com process_motion_graphics():
+    - src: path no volume compartilhado (png_path do v-llm-directors)
+    - start_time / end_time: em milissegundos
+    - position: {x, y, width, height}
+    - animation_sequence: frames animados (se existirem)
+    """
+    results = []
     layer_index = 0
 
-    for scene in rendered_scenes:
-        scene_id = scene.get("scene_id", "unknown")
+    for scene_idx, scene in enumerate(rendered_scenes):
+        scene_id = scene.get("scene_id", f"scene_{scene_idx:02d}")
+
+        # Timing da cena
+        timing = scene_timings[scene_idx] if scene_idx < len(scene_timings) else {
+            "start_ms": 0, "end_ms": 5000
+        }
+        scene_start_ms = timing["start_ms"]
+        scene_end_ms = timing["end_ms"]
 
         for layer in scene.get("layers", []):
             layer_id = layer.get("id", f"layer_{layer_index}")
+            position = layer.get("position", {"x": 0, "y": 0})
             animation = layer.get("animation")
+            animation_sequence = layer.get("animation_sequence")
 
-            png_entry = {
-                "phrase_index": layer_index,
-                "layer_id": layer_id,
+            # Obter src (path no volume compartilhado)
+            src = layer.get("png_path") or layer.get("png_base64")
+
+            if not src:
+                logger.warning(f"   ⚠️ Layer {layer_id} sem png_path nem png_base64, pulando")
+                layer_index += 1
+                continue
+
+            # Se recebemos base64 (fallback), logar aviso
+            is_path = not src.startswith("/9j/") and not src.startswith("iVBOR")
+            if not is_path:
+                logger.warning(
+                    f"   ⚠️ Layer {layer_id} retornou base64 ao invés de path. "
+                    f"Verifique se o volume compartilhado está montado em v-llm-directors."
+                )
+                layer_index += 1
+                continue
+
+            entry = {
+                "id": layer_id,
                 "scene_id": scene_id,
-                "type": layer.get("type", "unknown"),
-                "description": layer.get("description", ""),
-                "z_index": layer.get("z_index", 100),
+                "type": layer.get("type", "motion_graphic"),
+                "src": src,
+                "start_time": scene_start_ms,
+                "end_time": scene_end_ms,
+                "position": {
+                    "x": position.get("x", 0),
+                    "y": position.get("y", 0),
+                    "width": layer.get("width", canvas_w),
+                    "height": layer.get("height", canvas_h),
+                },
+                "zIndex": layer.get("z_index", 2200 + layer_index),
                 "is_static": layer.get("is_static", True),
-                "width": layer.get("width", canvas_w),
-                "height": layer.get("height", canvas_h),
-                "position": layer.get("position", {"x": 0, "y": 0}),
-                "anchor_point": layer.get("anchor_point", {"x": canvas_w / 2, "y": canvas_h / 2}),
+                "description": layer.get("description", ""),
                 "source": "visual_layout_director",
             }
 
-            # PNG data (base64 ou path)
-            if layer.get("png_base64"):
-                png_entry["png_base64"] = layer["png_base64"]
-            elif layer.get("png_path"):
-                png_entry["png_path"] = layer["png_path"]
-
-            # Animation metadata (para v-editor-python)
+            # Animação CSS (metadata para futuro)
             if animation:
-                png_entry["animation"] = animation
+                entry["animation"] = animation
 
-            png_results.append(png_entry)
+            # PNG sequence animada (para v-editor-python)
+            if animation_sequence:
+                entry["animation_sequence"] = animation_sequence
+                entry["is_static"] = False
+                # Duração da animação pode ser mais curta que a cena
+                anim_duration_ms = animation_sequence.get("duration_ms", 0)
+                if anim_duration_ms > 0:
+                    entry["anim_duration_ms"] = anim_duration_ms
+
+            results.append(entry)
             layer_index += 1
 
-        # Stroke reveals (masks)
+            logger.info(
+                f"   📦 MG #{layer_index - 1}: {layer_id} | "
+                f"src={src[-50:]} | "
+                f"time={scene_start_ms}-{scene_end_ms}ms | "
+                f"static={entry['is_static']} | "
+                f"anim_seq={'yes' if animation_sequence else 'no'}"
+            )
+
+        # Stroke reveals (masks animados)
         for stroke in scene.get("stroke_reveals", []):
-            png_entry = {
-                "phrase_index": layer_index,
-                "layer_id": stroke.get("id", f"stroke_{layer_index}"),
+            stroke_id = stroke.get("id", f"stroke_{layer_index}")
+            results.append({
+                "id": stroke_id,
                 "scene_id": scene_id,
                 "type": "stroke_reveal",
-                "z_index": 350,
+                "start_time": scene_start_ms,
+                "end_time": scene_end_ms,
+                "zIndex": 350,
                 "is_static": False,
                 "source": "visual_layout_director",
                 "hq_png_base64": stroke.get("hq_png_base64"),
@@ -306,9 +422,8 @@ def _upload_and_build_png_results(
                 "reveal": stroke.get("reveal", {}),
                 "total_frames": stroke.get("total_frames", 0),
                 "fps": stroke.get("fps", 30),
-            }
-            png_results.append(png_entry)
+            })
             layer_index += 1
 
-    logger.info(f"   📦 png_results: {len(png_results)} entries")
-    return png_results
+    logger.info(f"   📦 motion_graphics total: {len(results)} entries")
+    return results

@@ -34,11 +34,12 @@ def render_step(state: PipelineState, params: dict) -> PipelineState:
         or get_env('DEFAULT_EDITOR_WORKER', 'python')
     )
 
-    # ═══ Auto-select render-pod para motion_graphics ═══
-    if state.storytelling_mode == "motion_graphics" and worker_preference != "render-pod":
-        if get_env('RENDER_POD_ENABLED', 'false').lower() == 'true':
-            logger.info(f"🎨 [RENDER] STM=motion_graphics → auto-selecionando render-pod (era: {worker_preference})")
-            worker_preference = "render-pod"
+    # ═══ Motion Graphics: forçar v-editor-python (Hetzner) ═══
+    # Render-pod não suporta PNGs via path do volume compartilhado.
+    # Toda renderização MG é feita no v-editor-python (Hetzner-first).
+    if state.storytelling_mode == "motion_graphics" and worker_preference == "render-pod":
+        logger.info(f"🎨 [RENDER] STM=motion_graphics → forçando v-editor-python (era: render-pod)")
+        worker_preference = "python"
 
     service = RenderService(editor_worker_id=worker_preference)
     payload = dict(state.subtitle_payload)  # cópia

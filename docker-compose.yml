@@ -121,6 +121,9 @@ services:
       # V-EDITOR
       V_EDITOR_URL: ${V_EDITOR_URL:-http://v-editor:5018}
 
+      # V-LLM-DIRECTORS
+      V_LLM_DIRECTORS_URL: ${V_LLM_DIRECTORS_URL:-http://v-llm-directors:5025}
+
       # Webhook
       WEBHOOK_INTERNAL_URL: http://v-api:5000
 
