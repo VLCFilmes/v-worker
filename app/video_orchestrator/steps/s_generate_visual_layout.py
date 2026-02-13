@@ -195,6 +195,9 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
     llm_result = result.get("llm_result", {})
     llm_usage = result.get("llm_usage", {})
 
+    total_layers = sum(len(s.get("layers", [])) for s in rendered_scenes)
+    total_strokes = sum(len(s.get("stroke_reveals", [])) for s in rendered_scenes)
+
     if result_render_mode == "flat":
         # ── FLAT MODE: cenas pré-compostas pelo Playwright ──
         total_frames_all = sum(s.get("total_frames", 0) for s in rendered_scenes)
@@ -241,9 +244,6 @@ def generate_visual_layout_step(state: PipelineState, params: dict) -> PipelineS
         }
     else:
         # ── LAYERED MODE (padrão) ──
-        total_layers = sum(len(s.get("layers", [])) for s in rendered_scenes)
-        total_strokes = sum(len(s.get("stroke_reveals", [])) for s in rendered_scenes)
-
         logger.info(
             f"✅ [VISUAL_LAYOUT] Resultado: "
             f"{len(rendered_scenes)} cenas, {total_layers} layers, "
